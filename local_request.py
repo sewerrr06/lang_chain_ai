@@ -1,10 +1,19 @@
 import requests
 
-url = "http://127.0.0.1:8000/ask"
-question = {"question": input("Enter your question: ")}
+# IP твого AI-ноутбука в мережі Tailscale
+SERVER_IP = "100.113.28.5" 
+URL = f"http://{SERVER_IP}:8000/ask"
 
-response = requests.post(url, json=question, timeout=120)
-if not response.ok:
-    print(f"Помилка {response.status_code}: {response.text}")
-else:
-    print(response.json()["answer"])
+def ask_ai():
+    question = input("Запитай щось: ")
+    try:
+        response = requests.post(URL, json={"question": question})
+        if response.status_code == 200:
+            print(f"\nАгент: {response.json()['answer']}")
+        else:
+            print(f"Помилка сервера: {response.status_code}")
+    except Exception as e:
+        print(f"Не вдалося з'єднатися з сервером: {e}")
+
+if __name__ == "__main__":
+    ask_ai()
