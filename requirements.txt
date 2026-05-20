@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+langchain-ollama
+langchain-community
+langchain-chroma
+langchain-text-splitters
+requests
+ollama
