@@ -7,71 +7,64 @@ import subprocess
 
 app = FastAPI()
 
-# 1. Інструмент для взаємодії з Docker
-@tool
-def get_docker_status():
-    """
-    Повертає список запущених Docker контейнерів.
-    Викликай цей інструмент, коли користувач запитує:
-    - Що запущено в Docker
-    - Статус контейнерів
-    - Чи працює якийсь сервіс
-    """
+# 1. Ця функція виконує реальну команду (проста Python-функція)
+def get_docker_status_logic():
     try:
-        # Повертаємо результат команди docker ps
         return subprocess.check_output(["docker", "ps"], text=True)
     except Exception as e:
         return f"Помилка при виконанні docker ps: {str(e)}"
 
-# 2. Налаштування моделі
-# temperature=0 робить модель максимально логічною та послідовною
+# 2. Це інструмент для AI (обгортка над нашою функцією)
+@tool
+def get_docker_tool():
+    """
+    Використовуй цей інструмент, щоб отримати список запущених Docker контейнерів.
+    Викликай його, якщо запит стосується Docker або статусу контейнерів.
+    """
+    return get_docker_status_logic()
+
+# 3. Налаштування моделі
 llm = ChatOllama(model="hermes3", temperature=0)
-llm_with_tools = llm.bind_tools([get_docker_status])
+# Прив'язуємо інструмент до моделі
+llm_with_tools = llm.bind_tools([get_docker_tool])
 
 class QueryRequest(BaseModel):
     question: str
 
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
-    # Створюємо історію повідомлень з чіткими інструкціями
     messages = [
         SystemMessage(content=(
-            "Ти — технічний AI-агент. Твоє завдання — допомагати з керуванням системою. "
-            "У тебе є доступ до інструменту 'get_docker_status'. "
-            "Якщо запит користувача пов'язаний з Docker, контейнерами або статусом сервісів, "
-            "ТИ МАЄШ викликати цей інструмент."
+            "Ти — технічний AI-агент. У тебе є інструмент 'get_docker_tool'. "
+            "Якщо користувач питає про Docker або контейнери, ТИ МАЄШ викликати цей інструмент."
         )),
         HumanMessage(content=request.question)
     ]
     
-    # Перший виклик моделі
+    # Виклик моделі
     response = llm_with_tools.invoke(messages)
     
-    # Якщо модель вирішила викликати інструмент
+    # Перевіряємо чи модель хоче використати інструмент
     if response.tool_calls:
-        print(f"DEBUG: Модель вирішила викликати інструмент: {response.tool_calls}")
-        
-        # Обробляємо виклик
         for tool_call in response.tool_calls:
-            if tool_call["name"] == "get_docker_status":
-                # Виконуємо код
-                tool_output = get_docker_status()
+            # Перевіряємо ім'я інструменту
+            if tool_call["name"] == "get_docker_tool":
+                # ВИКЛИКАЄМО ЧИСТУ ФУНКЦІЮ (не інструмент!)
+                tool_output = get_docker_status_logic()
                 
-                # Додаємо в історію повідомлення моделі (AIMessage) та результат (ToolMessage)
+                # Додаємо історію
                 messages.append(response)
                 messages.append(ToolMessage(
                     tool_call_id=tool_call["id"], 
                     content=tool_output
                 ))
         
-        # Фінальний виклик моделі: тепер вона "бачить" результат і пише відповідь
+        # Отримуємо фінальну відповідь на основі даних
         final_response = llm_with_tools.invoke(messages)
         return {"answer": final_response.content}
     
-    # Якщо модель не захотіла викликати інструмент, відповідаємо текстом
     return {"answer": response.content}
 
 if __name__ == "__main__":
     import uvicorn
-    # 0.0.0.0 відкриває доступ для інших пристроїв через Tailscale
     uvicorn.run(app, host="0.0.0.0", port=8000)
