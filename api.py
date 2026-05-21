@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 import subprocess
 import os
 
@@ -11,6 +11,25 @@ app = FastAPI()
 # --- ПАМ'ЯТЬ (Історія діалогів) ---
 # Структура: { session_id: [messages] }
 sessions = {}
+MAX_TOOL_ITERATIONS = 10
+MAX_HISTORY_MESSAGES = 40
+
+SYSTEM_PROMPT = (
+    "Ти — технічний AI-агент на Linux-сервері. Тобі доступні інструменти:\n"
+    "1. get_docker_status — список запущених Docker контейнерів.\n"
+    "2. read_log_tool — останні N рядків лог-файлу (потрібен шлях).\n"
+    "3. list_directory — файли й папки в директорії (path).\n"
+    "4. execute_command — shell-команди (pwd, ls, mpstat, top тощо).\n"
+    "Правила:\n"
+    "- ЗАВЖДИ викликай інструмент, якщо потрібні факти з системи. Не вигадуй цифри, шляхи чи списки файлів.\n"
+    "- Кожна execute_command запускається в НОВОМУ shell: `cd` не зберігається між викликами. "
+    "Замість «зайти в папку» використовуй повний шлях: list_directory('/home/sewer/course') "
+    "або execute_command('ls -la /home/sewer/course').\n"
+    "- Для CPU/навантаження: execute_command('mpstat 1 1') або "
+    "execute_command(\"grep 'cpu ' /proc/stat; cat /proc/loadavg\") і поясни РЕАЛЬНИЙ вивід. "
+    "Load average (напр. 1.31) — це НЕ відсотки CPU.\n"
+    "- Якщо інструмент повернув порожній рядок — спробуй іншу команду або шлях, не мовчи."
+)
 
 # --- ІНСТРУМЕНТИ ---
 
@@ -29,7 +48,7 @@ def read_log_tool(file_path: str, lines: int = 20):
         return f"Файл {file_path} не знайдено."
     try:
         # Використовуємо tail для отримання останніх N рядків
-        return subprocess.check_output(["tail", f"-n {lines}", file_path], text=True)
+        return subprocess.check_output(["tail", "-n", str(lines), file_path], text=True)
     except Exception as e:
         return f"Помилка читання файлу: {str(e)}"
 
@@ -47,8 +66,8 @@ def list_directory(path: str = "."):
 @tool
 def execute_command(command: str):
     """
-    Виконує команду в терміналі (наприклад: 'pwd', 'ls -la', 'docker ps').
-    Використовуй це, коли користувач хоче дізнатися інформацію про систему або файли.
+    Виконує команду в терміналі (наприклад: 'pwd', 'ls -la /home/user/course', 'mpstat 1 1').
+    Кожен виклик — окремий shell; `cd` не діє між викликами — використовуй абсолютні шляхи.
     """
     try:
         result = subprocess.check_output(
@@ -62,10 +81,19 @@ def execute_command(command: str):
 
 # --- НАЛАШТУВАННЯ ---
 
+TOOLS = [get_docker_status, read_log_tool, list_directory, execute_command]
+TOOL_BY_NAME = {t.name: t for t in TOOLS}
+
 llm = ChatOllama(model="hermes3", temperature=0)
-llm_with_tools = llm.bind_tools(
-    [get_docker_status, read_log_tool, list_directory, execute_command]
-)
+llm_with_tools = llm.bind_tools(TOOLS)
+
+
+def trim_session(session_id: str) -> None:
+    history = sessions[session_id]
+    if len(history) <= MAX_HISTORY_MESSAGES + 1:
+        return
+    sessions[session_id] = [history[0]] + history[-MAX_HISTORY_MESSAGES:]
+
 
 class QueryRequest(BaseModel):
     session_id: str  # Додаємо ID сесії для пам'яті
@@ -76,54 +104,44 @@ async def ask_question(request: QueryRequest):
     session_id = request.session_id
     user_q = request.question
     
-    # Ініціалізація історії для нової сесії
     if session_id not in sessions:
-        sessions[session_id] = [
-            SystemMessage(content=(
-                "Ти — технічний AI-агент. Тобі доступні інструменти:\n"
-                "1. get_docker_status - для Docker.\n"
-                "2. read_log_tool - для читання логів (потрібен шлях до файлу).\n"
-                "3. list_directory - для перегляду файлів і папок (опційно path).\n"
-                "4. execute_command - для виконання shell-команд (pwd, ls -la, docker ps тощо).\n"
-                "Пам'ятай контекст попередніх повідомлень. Якщо помилка в логах - аналізуй її."
-            ))
-        ]
-    
-    # Додаємо питання користувача в історію
+        sessions[session_id] = [SystemMessage(content=SYSTEM_PROMPT)]
+
     sessions[session_id].append(HumanMessage(content=user_q))
-    
-    # Виклик моделі з повною історією
+    trim_session(session_id)
+
     response = llm_with_tools.invoke(sessions[session_id])
-    
-    # Якщо модель викликає інструменти
-    if response.tool_calls:
-        sessions[session_id].append(response) # Додаємо запит моделі
-        
+    iterations = 0
+
+    while getattr(response, "tool_calls", None) and iterations < MAX_TOOL_ITERATIONS:
+        iterations += 1
+        sessions[session_id].append(response)
+
         for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            
-            # Виконання
-            if tool_name == "get_docker_status":
-                output = get_docker_status.invoke({})
-            elif tool_name == "read_log_tool":
-                output = read_log_tool.invoke(tool_args)
-            elif tool_name == "list_directory":
-                output = list_directory.invoke(tool_args)
-            elif tool_name == "execute_command":
-                output = execute_command.invoke(tool_args)
+            tool = TOOL_BY_NAME.get(tool_call["name"])
+            if tool is None:
+                output = f"Невідомий інструмент: {tool_call['name']}"
             else:
-                output = "Невідомий інструмент."
-                
-            sessions[session_id].append(ToolMessage(tool_call_id=tool_call["id"], content=output))
-        
-        # Фінальний виклик
+                output = tool.invoke(tool_call["args"])
+            if not str(output).strip():
+                output = "(команда виконана, вивід порожній — спробуй іншу команду або повний шлях)"
+            sessions[session_id].append(
+                ToolMessage(tool_call_id=tool_call["id"], content=str(output))
+            )
+
         response = llm_with_tools.invoke(sessions[session_id])
-    
-    # Додаємо фінальну відповідь моделі в історію
+
     sessions[session_id].append(response)
-    
-    return {"answer": response.content}
+    trim_session(session_id)
+
+    answer = (response.content or "").strip()
+    if not answer:
+        answer = (
+            "Агент не зміг сформулювати відповідь (модель не викликала інструменти "
+            "або потрібен ще один крок). Спробуйте: «покажи вміст /home/sewer/course»."
+        )
+
+    return {"answer": answer}
 
 if __name__ == "__main__":
     import uvicorn
