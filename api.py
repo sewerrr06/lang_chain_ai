@@ -7,62 +7,77 @@ import subprocess
 
 app = FastAPI()
 
-# 1. Функція виконання команди (чиста логіка)
-def get_docker_status_logic():
+# --- ІНСТРУМЕНТИ ---
+
+@tool
+def get_docker_tool():
+    """Повертає список запущених Docker контейнерів. Використовуй це для питань про докери."""
     try:
         return subprocess.check_output(["docker", "ps"], text=True)
     except Exception as e:
-        return f"Помилка при виконанні docker ps: {str(e)}"
+        return f"Помилка Docker: {str(e)}"
 
-# 2. Інструмент для моделі
 @tool
-def get_docker_tool():
-    """Використовуй цей інструмент для отримання списку запущених Docker контейнерів."""
-    return get_docker_status_logic()
+def get_system_stats():
+    """Повертає завантаженість системи: RAM, CPU load (uptime). Використовуй це, коли питають про ресурси, навантаження, CPU або RAM."""
+    try:
+        mem = subprocess.check_output(["free", "-h"], text=True)
+        load = subprocess.check_output(["uptime"], text=True)
+        return f"Пам'ять (RAM):\n{mem}\nНавантаження (Load): {load}"
+    except Exception as e:
+        return f"Помилка системи: {str(e)}"
 
-# 3. Налаштування моделі
+# --- НАЛАШТУВАННЯ ---
+
 llm = ChatOllama(model="hermes3", temperature=0)
-llm_with_tools = llm.bind_tools([get_docker_tool])
+# Додаємо список інструментів
+llm_with_tools = llm.bind_tools([get_docker_tool, get_system_stats])
 
 class QueryRequest(BaseModel):
     question: str
 
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
-
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
-    # БЕЗПЕЧНИЙ ПІДХІД: Перетворюємо об'єкт Pydantic на словник
-    # Це обходить конфлікт версій Pydantic V1/V2
-    request_data = request.model_dump() 
-    question_text = request_data.get("question")
+    # Явно перераховуємо інструменти в системному промпті для надійності
+    system_prompt = (
+        "Ти — системний AI-агент. Тобі доступні інструменти:\n"
+        "1. get_docker_tool - для перевірки Docker контейнерів.\n"
+        "2. get_system_stats - для перевірки навантаження CPU/RAM.\n"
+        "Якщо користувач питає про це — ВИКОРИСТОВУЙ відповідний інструмент. НЕ вигадуй дані."
+    )
+    
+    # Безпечне вилучення даних
+    data = request.model_dump()
+    user_q = data.get("question")
     
     messages = [
-        SystemMessage(content=(
-            "Ти — технічний AI-агент. Твоє завдання — допомагати з керуванням системою. "
-            "У тебе є інструмент 'get_docker_tool'. "
-            "Якщо запит стосується Docker або контейнерів, ТИ МАЄШ викликати get_docker_tool."
-        )),
-        HumanMessage(content=question_text)
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_q)
     ]
     
-    # Виклик моделі
+    # Перший виклик моделі
     response = llm_with_tools.invoke(messages)
     
-    # Перевірка на tool_calls
+    # Цикл обробки інструментів (може викликати кілька)
     if response.tool_calls:
-        for tool_call in response.tool_calls:
-            if tool_call["name"] == "get_docker_tool":
-                tool_output = get_docker_status_logic()
-                
-                messages.append(response)
-                messages.append(ToolMessage(
-                    tool_call_id=tool_call["id"], 
-                    content=tool_output
-                ))
+        print(f"DEBUG: Агент вирішив викликати: {response.tool_calls}")
+        messages.append(response) # Додаємо запит моделі на інструмент
         
-        # Фінальна відповідь
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_id = tool_call["id"]
+            
+            # Виконання
+            if tool_name == "get_docker_tool":
+                output = get_docker_tool.invoke({})
+            elif tool_name == "get_system_stats":
+                output = get_system_stats.invoke({})
+            else:
+                output = "Невідомий інструмент."
+                
+            messages.append(ToolMessage(tool_call_id=tool_id, content=output))
+        
+        # Фінальний виклик з результатами
         final_response = llm_with_tools.invoke(messages)
         return {"answer": final_response.content}
     
