@@ -31,6 +31,10 @@ llm_with_tools = llm.bind_tools([get_docker_tool])
 class QueryRequest(BaseModel):
     question: str
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "model": "hermes3"}
+
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
     messages = [
