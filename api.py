@@ -4,11 +4,12 @@ from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+import re
 import subprocess
 import os
 
 app = FastAPI()
-API_VERSION = "2.1"
+API_VERSION = "2.2"
 
 # --- ПАМ'ЯТЬ (Історія діалогів) ---
 # Структура: { session_id: [messages] }
@@ -19,8 +20,18 @@ MAX_HISTORY_MESSAGES = 40
 SYSTEM_PROMPT = (
     "Ти — технічний AI-агент. Твоє завдання — керувати сервером та перевіряти факти.\n"
     "Якщо ти в чомусь сумніваєшся або потрібна актуальна інформація — ВИКОРИСТОВУЙ web_search.\n"
-    "Якщо результат пошуку суперечить твоїм внутрішнім знанням — посилайся на результати пошуку."
+    "Якщо результат пошуку суперечить твоїм внутрішнім знанням — посилайся на результати пошуку.\n"
+    "МОВА (обов'язково): відповідай ВИКЛЮЧНО мовою останнього повідомлення користувача.\n"
+    "Питання українською — вся відповідь українською; англійською — англійською.\n"
+    "Не копіюй сирий текст з web_search — переказуй своїми словами потрібною мовою.\n"
+    "Заборонено змішувати мови в одній відповіді (англійська, китайська, українська тощо)."
 )
+
+LANGUAGE_LABELS = {
+    "uk": "українською",
+    "en": "англійською",
+    "ru": "російською",
+}
 
 METRICS_KEYWORDS = (
     "навантаж", "cpu", "статист", "mpstat", "load", "процесор",
@@ -120,7 +131,8 @@ def execute_command(command: str):
 search_tool = DuckDuckGoSearchRun()
 search_tool.name = "web_search"
 search_tool.description = (
-    "Використовуй для пошуку в інтернеті, щоб перевірити факти або уточнити інформацію."
+    "Використовуй для пошуку в інтернеті, щоб перевірити факти або уточнити інформацію. "
+    "Результати можуть бути різними мовами — у відповіді користувачу переказуй лише мовою його питання."
 )
 
 TOOLS = [
@@ -135,6 +147,57 @@ TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
 llm = ChatOllama(model="hermes3", temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
+
+
+def detect_question_language(text: str) -> str:
+    """Мова останнього питання: uk, en або ru."""
+    if re.search(r"[іїєґІЇЄҐ]", text):
+        return "uk"
+    t = text.lower()
+    uk_hints = (
+        "привіт", "що", "як", "розкажи", "покажи", "навантаж", "докер",
+        "контейнер", "сервер", "систем", "пам'ят", "операційн", "україн",
+    )
+    if any(h in t for h in uk_hints):
+        return "uk"
+    if re.search(r"[а-яА-ЯёЁ]", text):
+        return "ru"
+    return "en"
+
+
+def needs_language_fix(question_lang: str, answer: str) -> bool:
+    if not answer.strip():
+        return False
+    if re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", answer):
+        return True
+    cyrillic = len(re.findall(r"[а-яА-ЯіїєґІЇЄҐёЁ]", answer))
+    latin = len(re.findall(r"[a-zA-Z]", answer))
+    if question_lang == "uk" and latin > 80 and cyrillic < 40:
+        return True
+    if question_lang in ("uk", "ru") and latin > 200 and cyrillic < latin // 3:
+        return True
+    if question_lang == "en" and cyrillic > 80:
+        return True
+    return False
+
+
+def ensure_answer_language(user_q: str, answer: str) -> str:
+    lang = detect_question_language(user_q)
+    if not needs_language_fix(lang, answer):
+        return answer
+    label = LANGUAGE_LABELS.get(lang, lang)
+    prompt = (
+        f"Питання користувача ({label}): {user_q}\n\n"
+        f"Чернетка відповіді агента:\n{answer}\n\n"
+        f"Перепиши однією відповіддю ВИКЛЮЧНО {label}. "
+        "Збережи факти, прибери дублікати, посилання з пошуку та фрагменти іншими мовами. "
+        "Не згадуй інструменти та web_search."
+    )
+    response = llm.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    )
+    fixed = (response.content or "").strip()
+    return fixed or answer
 
 
 def is_metrics_question(text: str) -> bool:
@@ -191,16 +254,18 @@ def run_tool_loop(session_id: str):
 
 def answer_from_prefetched_data(user_q: str, tool_output: str) -> str:
     """Обхід: hermes3 часто не робить tool_calls — підсумовуємо реальні дані без них."""
+    label = LANGUAGE_LABELS.get(detect_question_language(user_q), "українською")
     prompt = (
         f"Питання користувача: {user_q}\n\n"
         f"Фактичні дані з сервера (get_system_load):\n{tool_output}\n\n"
-        "Дай чітку відповідь українською. Поясни цифри з виводу. "
+        f"Дай чітку відповідь виключно {label}. Поясни цифри з виводу. "
         "Не згадуй Docker. Не кажи користувачу викликати інструменти."
     )
     response = llm.invoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
     )
-    return (response.content or "").strip()
+    raw = (response.content or "").strip()
+    return ensure_answer_language(user_q, raw)
 
 
 class QueryRequest(BaseModel):
@@ -241,7 +306,7 @@ async def ask_question(request: QueryRequest):
         sessions[session_id].append(HumanMessage(content=user_q))
         sessions[session_id].append(AIMessage(content=answer))
         trim_session(session_id)
-        return {"answer": answer}
+        return {"answer": ensure_answer_language(user_q, answer)}
 
     sessions[session_id].append(HumanMessage(content=user_q))
     trim_session(session_id)
@@ -256,7 +321,7 @@ async def ask_question(request: QueryRequest):
             metrics = get_system_load.invoke({})
             answer = answer_from_prefetched_data(user_q, metrics)
             sessions[session_id].append(AIMessage(content=answer))
-            return {"answer": answer}
+            return {"answer": ensure_answer_language(user_q, answer)}
         response = run_tool_loop(session_id)
 
     sessions[session_id].append(response)
@@ -268,6 +333,8 @@ async def ask_question(request: QueryRequest):
             "Агент не зміг сформулювати відповідь. Спробуйте /reset або "
             "«покажи навантаження CPU»."
         )
+    else:
+        answer = ensure_answer_language(user_q, answer)
 
     return {"answer": answer}
 
