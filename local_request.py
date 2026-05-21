@@ -1,13 +1,20 @@
 import requests
 
 # IP твого AI-ноутбука в мережі Tailscale
-SERVER_IP = "100.113.28.5" 
+SERVER_IP = "100.113.28.5"
 URL = f"http://{SERVER_IP}:8000/ask"
+
+# Будь-який ідентифікатор сесії — однаковий ID = спільна історія діалогу
+SESSION_ID = "my_session"
 
 def ask_ai():
     question = input("Запитай щось: ")
+    payload = {
+        "session_id": SESSION_ID,
+        "question": question,
+    }
     try:
-        response = requests.post(URL, json={"question": question})
+        response = requests.post(URL, json=payload)
         if response.status_code == 200:
             print(f"\nАгент: {response.json()['answer']}")
         else:

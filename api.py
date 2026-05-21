@@ -33,10 +33,21 @@ def read_log_tool(file_path: str, lines: int = 20):
     except Exception as e:
         return f"Помилка читання файлу: {str(e)}"
 
+@tool
+def list_directory(path: str = "."):
+    """
+    Показує список файлів та папок у вказаній директорії.
+    Використовуй це, щоб орієнтуватися у файловій системі.
+    """
+    try:
+        return subprocess.check_output(["ls", "-F", path], text=True)
+    except Exception as e:
+        return f"Помилка доступу до папки: {str(e)}"
+
 # --- НАЛАШТУВАННЯ ---
 
 llm = ChatOllama(model="hermes3", temperature=0)
-llm_with_tools = llm.bind_tools([get_docker_status, read_log_tool])
+llm_with_tools = llm.bind_tools([get_docker_status, read_log_tool, list_directory])
 
 class QueryRequest(BaseModel):
     session_id: str  # Додаємо ID сесії для пам'яті
@@ -54,6 +65,7 @@ async def ask_question(request: QueryRequest):
                 "Ти — технічний AI-агент. Тобі доступні інструменти:\n"
                 "1. get_docker_status - для Docker.\n"
                 "2. read_log_tool - для читання логів (потрібен шлях до файлу).\n"
+                "3. list_directory - для перегляду файлів і папок (опційно path).\n"
                 "Пам'ятай контекст попередніх повідомлень. Якщо помилка в логах - аналізуй її."
             ))
         ]
@@ -77,6 +89,8 @@ async def ask_question(request: QueryRequest):
                 output = get_docker_status.invoke({})
             elif tool_name == "read_log_tool":
                 output = read_log_tool.invoke(tool_args)
+            elif tool_name == "list_directory":
+                output = list_directory.invoke(tool_args)
             else:
                 output = "Невідомий інструмент."
                 
