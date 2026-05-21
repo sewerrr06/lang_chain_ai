@@ -9,6 +9,11 @@ until ollama list >/dev/null 2>&1; do
   sleep 2
 done
 
+if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "${MODEL}"; then
+  echo "Модель ${MODEL} вже є — pull пропущено."
+  exit 0
+fi
+
 echo "Завантаження моделі ${MODEL} (може зайняти кілька хвилин)..."
 ollama pull "${MODEL}"
 echo "Модель ${MODEL} готова."

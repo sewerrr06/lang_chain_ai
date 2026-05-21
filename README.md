@@ -8,10 +8,15 @@
 
 ```bash
 cp .env.example .env
+
+# Перший раз — завантажити hermes3 (~4.7 GB, 5–15 хв)
+docker compose --profile init run --rm ollama-init
+
+# Далі завжди лише це (без повторного pull)
 docker compose up -d --build
 ```
 
-Перший запуск завантажить `hermes3` (5–15 хв). API: `http://<IP_сервера>:8000`.
+API: `http://<IP_сервера>:8000`.
 
 У `.env` на сервері вкажіть CORS для вашого Mac:
 
@@ -38,6 +43,26 @@ URL API можна змінити в полі «API на сервері» в с�
 ```bash
 curl http://100.113.28.5:8000/health
 ```
+
+### Помилка `cannot stop container: permission denied`
+
+Часто через `sudo docker` після запуску без sudo (або навпаки). На сервері:
+
+```bash
+# Один спосіб на всі команди — або завжди sudo, або без (користувач у групі docker)
+sudo docker rm -f lang_chain_ai-api-1 lang_chain_ai-frontend-1 2>/dev/null
+sudo docker compose up -d --build --remove-orphans
+```
+
+Довгостроково (без sudo):
+
+```bash
+sudo usermod -aG docker $USER
+# вийти з SSH і зайти знову
+docker compose up -d --build --remove-orphans
+```
+
+Якщо не допомогло — перезапуск демона: `sudo systemctl restart docker`, потім `docker compose up` знову.
 
 ## Файли
 
