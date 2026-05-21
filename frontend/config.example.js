@@ -1,5 +1,5 @@
 // Скопіюйте: cp config.example.js config.js
-// IP сервера (Tailscale, LAN або публічний). Порт API — 8000.
+// REMOTE API для проксі (scripts/run-frontend.sh). У браузері використовуйте /api.
 window.APP_CONFIG = {
   API_BASE: "http://100.113.28.5:8000",
 };

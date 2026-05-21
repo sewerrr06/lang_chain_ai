@@ -28,15 +28,15 @@ CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 
 ```bash
 cp frontend/config.example.js frontend/config.js
-# Відредагуйте API_BASE — IP сервера (напр. Tailscale 100.113.28.5)
+# У config.js — API_BASE = URL сервера (для проксі)
 
 chmod +x scripts/run-frontend.sh
 ./scripts/run-frontend.sh
 ```
 
-Відкрийте http://localhost:8080 — запити йдуть напряму на `http://<сервер>:8000`.
+Відкрийте http://localhost:8080. У полі «API на сервері» має бути **`http://localhost:8080/api`** (локальний проксі → сервер, без CORS).
 
-URL API можна змінити в полі «API на сервері» в сайдбарі (зберігається в браузері).
+Якщо було збережено `http://100.113.28.5:8000` — змініть на `/api` або очистіть site data для localhost.
 
 ### Перевірка
 
@@ -63,6 +63,24 @@ docker compose up -d --build --remove-orphans
 ```
 
 Якщо не допомогло — перезапуск демона: `sudo systemctl restart docker`, потім `docker compose up` знову.
+
+### Сервер падає на «привіт» / будь-який запит
+
+Часто **не вистачає RAM** для `hermes3` (~4.7 GB) + Ollama. Після запиту:
+
+```bash
+docker compose logs api --tail 50
+docker compose logs ollama --tail 50
+dmesg | tail -20 | grep -i oom
+```
+
+Потрібно **≥8 GB RAM** на сервері. Оновіть код (`git pull`) і перезберіть API:
+
+```bash
+docker compose up -d --build api
+```
+
+На «привіт» більше не запускається веб-пошук (раніше це перевантажувало систему).
 
 ## Файли
 

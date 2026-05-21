@@ -1,26 +1,39 @@
-from fastapi import FastAPI
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+import os
 import re
 import subprocess
-import os
+import time
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("api")
+
 API_VERSION = "2.4"
+OLLAMA_READY = False
 
 CORS_ORIGINS = [
     o.strip()
-    for o in os.environ.get("CORS_ORIGINS", "*").split(",")
+    for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081",
+    ).split(",")
     if o.strip()
 ]
+_allow_credentials = "*" not in CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,7 +92,16 @@ def get_system_load():
 @tool
 def get_docker_status():
     """Повертає список запущених Docker контейнерів."""
-    return subprocess.check_output(["docker", "ps"], text=True)
+    try:
+        return subprocess.check_output(
+            ["docker", "ps"], text=True, stderr=subprocess.STDOUT, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        return "Помилка: docker ps перевищив час очікування."
+    except subprocess.CalledProcessError as e:
+        return f"Помилка docker ps: {e.output}"
+    except Exception as e:
+        return f"Помилка docker: {e}"
 
 
 @tool
@@ -132,8 +154,48 @@ TOOLS = [
 ]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
-llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
+LLM_READ_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "600"))
+LLM_CONNECT_TIMEOUT = float(os.environ.get("LLM_CONNECT_TIMEOUT", "120"))
+_HTTPX_TIMEOUT = httpx.Timeout(LLM_READ_TIMEOUT, connect=LLM_CONNECT_TIMEOUT)
+
+llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0,
+    timeout=_HTTPX_TIMEOUT,
+    num_ctx=4096,
+)
 llm_with_tools = llm.bind_tools(TOOLS)
+
+
+def _warmup_ollama() -> None:
+    global OLLAMA_READY
+    logger.info(
+        "Прогрів Ollama: %s @ %s (перший запуск може зайняти 1–3 хв)",
+        OLLAMA_MODEL,
+        OLLAMA_BASE_URL,
+    )
+    try:
+        llm.invoke([HumanMessage(content="ok")])
+        OLLAMA_READY = True
+        logger.info("Ollama готова до запитів")
+    except Exception as e:
+        OLLAMA_READY = False
+        logger.warning("Прогрів Ollama не вдався: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.to_thread(_warmup_ollama)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+WEB_SEARCH_HINTS = (
+    "погод", "новин", "курс", "ціна", "сьогодні", "зараз", "актуальн",
+    "weather", "news", "price", "today", "current",
+)
 
 
 def _letter_counts(text: str) -> tuple[int, int]:
@@ -195,8 +257,38 @@ def run_web_search(query: str) -> str:
         return f"Помилка пошуку: {e}"
 
 
+def _invoke_tool(tool_call: dict) -> str:
+    tool = TOOL_BY_NAME.get(tool_call["name"])
+    if tool is None:
+        return f"Невідомий інструмент: {tool_call['name']}"
+    try:
+        output = tool.invoke(tool_call["args"])
+    except Exception as e:
+        logger.exception("tool %s failed", tool_call.get("name"))
+        return f"Помилка інструменту {tool_call['name']}: {e}"
+    if not str(output).strip():
+        return "(порожній вивід — спробуй інший інструмент або інший запит)"
+    return str(output)
+
+
+def _invoke_llm_with_retry(messages):
+    last_err = None
+    for attempt in range(2):
+        try:
+            return llm_with_tools.invoke(messages)
+        except Exception as e:
+            last_err = e
+            err = str(e).lower()
+            if attempt == 0 and ("timeout" in err or "timed out" in err):
+                logger.warning("Таймаут Ollama, повтор через 15 с: %s", e)
+                time.sleep(15)
+                continue
+            raise
+    raise last_err
+
+
 def run_tool_loop(session_id: str) -> AIMessage:
-    response = llm_with_tools.invoke(sessions[session_id])
+    response = _invoke_llm_with_retry(sessions[session_id])
     iterations = 0
 
     while getattr(response, "tool_calls", None) and iterations < MAX_TOOL_ITERATIONS:
@@ -204,20 +296,40 @@ def run_tool_loop(session_id: str) -> AIMessage:
         sessions[session_id].append(response)
 
         for tool_call in response.tool_calls:
-            tool = TOOL_BY_NAME.get(tool_call["name"])
-            if tool is None:
-                output = f"Невідомий інструмент: {tool_call['name']}"
-            else:
-                output = tool.invoke(tool_call["args"])
-            if not str(output).strip():
-                output = "(порожній вивід — спробуй інший інструмент або інший запит)"
+            output = _invoke_tool(tool_call)
             sessions[session_id].append(
-                ToolMessage(tool_call_id=tool_call["id"], content=str(output))
+                ToolMessage(tool_call_id=tool_call["id"], content=output)
             )
 
-        response = llm_with_tools.invoke(sessions[session_id])
+        response = _invoke_llm_with_retry(sessions[session_id])
 
     return response
+
+
+def _had_tool_messages(session_id: str) -> bool:
+    return any(
+        isinstance(msg, ToolMessage) for msg in sessions.get(session_id, [])
+    )
+
+
+def should_try_web_search(user_q: str, session_id: str) -> bool:
+    if _had_tool_messages(session_id):
+        return False
+    q = user_q.lower()
+    return any(h in q for h in WEB_SEARCH_HINTS)
+
+
+def simple_chat_fallback(user_q: str) -> str:
+    q = user_q.lower().strip()
+    if q in ("привіт", "привет", "hello", "hi", "hey", "вітаю"):
+        return (
+            "Привіт! Я технічний агент. Можу перевірити навантаження CPU, "
+            "Docker-контейнери, файли та логи на сервері. Задайте конкретне питання."
+        )
+    return (
+        "Не вдалося отримати відповідь від моделі (можливо, не вистачає RAM для hermes3). "
+        "Спробуйте /reset або простіше питання, наприклад: «покажи docker ps»."
+    )
 
 
 def _summarize_context(user_q: str, context: str, context_title: str) -> str:
@@ -257,13 +369,10 @@ def finalize_answer(session_id: str, user_q: str, response: AIMessage) -> str:
     answer = (response.content or "").strip()
     if not answer:
         answer = answer_from_tool_context(session_id, user_q)
-    if not answer:
+    if not answer and should_try_web_search(user_q, session_id):
         answer = answer_from_web_search(user_q)
     if not answer:
-        return (
-            "Агент не зміг сформулювати відповідь. Спробуйте /reset або "
-            "переформулюйте питання."
-        )
+        return simple_chat_fallback(user_q)
     return ensure_answer_language(user_q, answer)
 
 
@@ -274,11 +383,20 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 async def health():
+    ollama_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
+            ollama_ok = r.status_code == 200
+    except Exception:
+        pass
     return {
-        "status": "ok",
+        "status": "ok" if ollama_ok else "degraded",
         "api_version": API_VERSION,
         "model": OLLAMA_MODEL,
         "ollama_base_url": OLLAMA_BASE_URL,
+        "ollama_reachable": ollama_ok,
+        "ollama_model_warmed": OLLAMA_READY,
     }
 
 
@@ -306,13 +424,18 @@ async def ask_question(request: QueryRequest):
     sessions[session_id].append(HumanMessage(content=user_q))
     trim_session(session_id)
 
-    response = run_tool_loop(session_id)
-    answer = finalize_answer(session_id, user_q, response)
-
-    sessions[session_id].append(AIMessage(content=answer))
-    trim_session(session_id)
-
-    return {"answer": answer}
+    try:
+        response = run_tool_loop(session_id)
+        answer = finalize_answer(session_id, user_q, response)
+        sessions[session_id].append(AIMessage(content=answer))
+        trim_session(session_id)
+        return {"answer": answer}
+    except Exception as e:
+        logger.exception("ask failed session=%s", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Помилка агента: {e}. Перевірте логи: docker compose logs api ollama",
+        ) from e
 
 
 if __name__ == "__main__":

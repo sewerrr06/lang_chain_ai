@@ -5,13 +5,18 @@ function normalizeApiBase(url) {
   return (url || "").trim().replace(/\/+$/, "");
 }
 
+function isLocalFrontend() {
+  const h = window.location.hostname;
+  return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+}
+
 function getDefaultApiBase() {
+  // Локальний run-frontend.sh проксує /api → сервер (без CORS)
+  if (isLocalFrontend()) {
+    return normalizeApiBase(window.location.origin + "/api");
+  }
   if (window.APP_CONFIG?.API_BASE) {
     return normalizeApiBase(window.APP_CONFIG.API_BASE);
-  }
-  // Якщо фронт у Docker/nginx з проксі /api
-  if (window.location.pathname.startsWith("/api")) {
-    return normalizeApiBase(window.location.origin + "/api");
   }
   return "http://127.0.0.1:8000";
 }
@@ -180,8 +185,13 @@ sessionInput.addEventListener("change", () => {
   localStorage.setItem(SESSION_KEY, id);
 });
 
-apiUrlInput.value = localStorage.getItem(API_BASE_KEY) || getDefaultApiBase();
-saveApiBase(apiUrlInput.value);
+let apiBase = localStorage.getItem(API_BASE_KEY) || getDefaultApiBase();
+// Якщо збережено прямий URL сервера — на localhost краще проксі /api
+if (isLocalFrontend() && /^https?:\/\/\d/.test(apiBase)) {
+  apiBase = getDefaultApiBase();
+}
+apiUrlInput.value = apiBase;
+saveApiBase(apiBase);
 
 sessionInput.value = localStorage.getItem(SESSION_KEY) || randomSessionId();
 localStorage.setItem(SESSION_KEY, sessionInput.value);

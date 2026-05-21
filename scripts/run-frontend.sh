@@ -1,13 +1,21 @@
 #!/bin/sh
 set -e
-cd "$(dirname "$0")/../frontend"
+ROOT="$(dirname "$0")/.."
+cd "$ROOT/frontend"
 
 if [ ! -f config.js ]; then
   cp config.example.js config.js
-  echo "Створено config.js — вкажіть URL API на сервері (наприклад http://100.113.28.5:8000)"
+  echo "Створено config.js — REMOTE API для проксі (наприклад http://100.113.28.5:8000)"
 fi
 
 PORT="${FRONTEND_PORT:-8080}"
-echo "Фронтенд: http://localhost:${PORT}"
-echo "API (з config.js): $(grep API_BASE config.js | head -1)"
-exec python3 -m http.server "$PORT"
+
+if command -v lsof >/dev/null 2>&1 && lsof -ti:"$PORT" >/dev/null 2>&1; then
+  echo "Порт ${PORT} вже зайнятий — фронтенд, ймовірно, уже працює."
+  echo "Відкрийте: http://localhost:${PORT}"
+  echo "URL API в чаті: http://localhost:${PORT}/api"
+  echo "Зупинити: kill \$(lsof -ti:${PORT})"
+  exit 0
+fi
+
+exec python3 "$ROOT/scripts/frontend_server.py"
