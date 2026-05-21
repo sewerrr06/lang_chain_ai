@@ -1,6 +1,34 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.py[cod]
-chroma_db/
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environment & secrets
 .env
+.env.*
+!.env.example
+
+# Vector DB (generated locally)
+chroma_db/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
 .DS_Store
+
+# Logs & caches
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
