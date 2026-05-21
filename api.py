@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_core.tools import tool
+from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 import subprocess
@@ -16,16 +17,9 @@ MAX_TOOL_ITERATIONS = 10
 MAX_HISTORY_MESSAGES = 40
 
 SYSTEM_PROMPT = (
-    "Ти — технічний AI-асистент на Linux-сервері. Ти САМ викликаєш інструменти.\n"
-    "НІКОЛИ не кажи користувачу «виклич функцію» — це робиш ти.\n"
-    "НІКОЛИ не згадуй Docker, якщо питання не про Docker.\n"
-    "Інструменти:\n"
-    "1. get_system_load — CPU, load average, uptime (навантаження системи).\n"
-    "2. execute_command — shell-команди.\n"
-    "3. list_directory — файли й папки.\n"
-    "4. read_log_tool — логи.\n"
-    "5. get_docker_status — лише для питань про Docker.\n"
-    "Правила: не вигадуй цифри; load average — це НЕ % CPU."
+    "Ти — технічний AI-агент. Твоє завдання — керувати сервером та перевіряти факти.\n"
+    "Якщо ти в чомусь сумніваєшся або потрібна актуальна інформація — ВИКОРИСТОВУЙ web_search.\n"
+    "Якщо результат пошуку суперечить твоїм внутрішнім знанням — посилайся на результати пошуку."
 )
 
 METRICS_KEYWORDS = (
@@ -123,7 +117,20 @@ def execute_command(command: str):
 
 # --- НАЛАШТУВАННЯ ---
 
-TOOLS = [get_system_load, execute_command, list_directory, read_log_tool, get_docker_status]
+search_tool = DuckDuckGoSearchRun()
+search_tool.name = "web_search"
+search_tool.description = (
+    "Використовуй для пошуку в інтернеті, щоб перевірити факти або уточнити інформацію."
+)
+
+TOOLS = [
+    get_system_load,
+    execute_command,
+    list_directory,
+    read_log_tool,
+    get_docker_status,
+    search_tool,
+]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
 llm = ChatOllama(model="hermes3", temperature=0)

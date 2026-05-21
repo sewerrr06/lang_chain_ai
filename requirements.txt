@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic
 langchain-ollama
 langchain-community
+duckduckgo-search
 langchain-chroma
 langchain-text-splitters
 requests
