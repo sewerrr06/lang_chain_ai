@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_ollama import ChatOllama
+from ollama import Client as OllamaClient
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 import os
 import re
@@ -19,7 +20,7 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
 
-API_VERSION = "2.5"
+API_VERSION = "2.6"
 OLLAMA_READY = False
 
 CORS_ORIGINS = [
@@ -31,13 +32,6 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 _allow_credentials = "*" not in CORS_ORIGINS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=_allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "hermes3")
@@ -159,11 +153,12 @@ LLM_READ_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "600"))
 LLM_CONNECT_TIMEOUT = float(os.environ.get("LLM_CONNECT_TIMEOUT", "120"))
 _HTTPX_TIMEOUT = httpx.Timeout(LLM_READ_TIMEOUT, connect=LLM_CONNECT_TIMEOUT)
 
+_ollama_client = OllamaClient(host=OLLAMA_BASE_URL, timeout=_HTTPX_TIMEOUT)
+
 llm = ChatOllama(
     model=OLLAMA_MODEL,
-    base_url=OLLAMA_BASE_URL,
+    client=_ollama_client,
     temperature=0,
-    timeout=_HTTPX_TIMEOUT,
     num_ctx=4096,
 )
 llm_with_tools = llm.bind_tools(TOOLS)
@@ -192,6 +187,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 logger.info("Запуск API v%s, Ollama: %s", API_VERSION, OLLAMA_BASE_URL)
 
 
@@ -205,7 +207,7 @@ async def unhandled_exception_handler(request, exc: Exception):
         content={
             "detail": (
                 f"{type(exc).__name__}: {exc}. "
-                "Перевірте: docker compose logs api --tail 30"
+                "Перевірте: docker compose logs app --tail 30"
             )
         },
     )
@@ -338,9 +340,14 @@ def should_try_web_search(user_q: str, session_id: str) -> bool:
     return any(h in q for h in WEB_SEARCH_HINTS)
 
 
+def is_simple_greeting(user_q: str) -> bool:
+    q = user_q.lower().strip().strip("!?.")
+    return q in ("привіт", "привет", "hello", "hi", "hey", "вітаю", "добрий день", "доброго дня")
+
+
 def simple_chat_fallback(user_q: str) -> str:
     q = user_q.lower().strip()
-    if q in ("привіт", "привет", "hello", "hi", "hey", "вітаю"):
+    if is_simple_greeting(user_q):
         return (
             "Привіт! Я технічний агент. Можу перевірити навантаження CPU, "
             "Docker-контейнери, файли та логи на сервері. Задайте конкретне питання."
@@ -440,6 +447,12 @@ async def ask_question(request: QueryRequest):
     if session_id not in sessions:
         reset_session(session_id)
 
+    if is_simple_greeting(user_q):
+        answer = simple_chat_fallback(user_q)
+        sessions[session_id].append(HumanMessage(content=user_q))
+        sessions[session_id].append(AIMessage(content=answer))
+        return {"answer": answer}
+
     sessions[session_id].append(HumanMessage(content=user_q))
     trim_session(session_id)
 
@@ -453,7 +466,7 @@ async def ask_question(request: QueryRequest):
         logger.exception("ask failed session=%s", session_id)
         raise HTTPException(
             status_code=500,
-            detail=f"Помилка агента: {e}. Перевірте логи: docker compose logs api ollama",
+            detail=f"Помилка агента: {e}. Перевірте логи: docker compose logs app",
         ) from e
 
 

@@ -1,9 +1,8 @@
 #!/bin/sh
 set -e
-echo "=== API → Ollama (127.0.0.1, спільна мережа з ollama) ==="
-docker compose exec api curl -sf --max-time 10 http://127.0.0.1:11434/api/tags | head -c 200
-echo ""
-echo ""
 echo "=== health ==="
-curl -sf http://127.0.0.1:8000/health
+curl -sf http://127.0.0.1:8000/health | python3 -m json.tool 2>/dev/null || curl -sf http://127.0.0.1:8000/health
+echo ""
+echo "=== Ollama tags (всередині app) ==="
+docker compose exec app curl -sf --max-time 10 http://127.0.0.1:11434/api/tags | head -c 300
 echo ""

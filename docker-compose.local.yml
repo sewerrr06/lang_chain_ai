@@ -1,25 +1,25 @@
+# Локальний тест: docker compose -f docker-compose.local.yml up --build
 services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       OLLAMA_BASE_URL: http://127.0.0.1:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-hermes3}
+      OLLAMA_MODEL: llama3.2:1b
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-600}
       LLM_CONNECT_TIMEOUT: ${LLM_CONNECT_TIMEOUT:-120}
     volumes:
       - ollama_data:/root/.ollama
-      - /var/run/docker.sock:/var/run/docker.sock
     mem_limit: 10g
-    restart: unless-stopped
+    restart: "no"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
       interval: 15s
       timeout: 10s
-      retries: 8
-      start_period: 120s
+      retries: 12
+      start_period: 180s
 
 volumes:
   ollama_data:

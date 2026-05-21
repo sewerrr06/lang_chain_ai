@@ -1,0 +1,7 @@
+# Швидкий локальний тест: ./scripts/test-local.sh
+services:
+  app:
+    ports:
+      - "8001:8000"
+    environment:
+      OLLAMA_MODEL: llama3.2:3b
