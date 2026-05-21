@@ -2,11 +2,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 import subprocess
 import os
 
 app = FastAPI()
+API_VERSION = "2.1"
 
 # --- ПАМ'ЯТЬ (Історія діалогів) ---
 # Структура: { session_id: [messages] }
@@ -15,23 +16,64 @@ MAX_TOOL_ITERATIONS = 10
 MAX_HISTORY_MESSAGES = 40
 
 SYSTEM_PROMPT = (
-    "Ти — технічний AI-агент на Linux-сервері. Тобі доступні інструменти:\n"
-    "1. get_docker_status — список запущених Docker контейнерів.\n"
-    "2. read_log_tool — останні N рядків лог-файлу (потрібен шлях).\n"
-    "3. list_directory — файли й папки в директорії (path).\n"
-    "4. execute_command — shell-команди (pwd, ls, mpstat, top тощо).\n"
-    "Правила:\n"
-    "- ЗАВЖДИ викликай інструмент, якщо потрібні факти з системи. Не вигадуй цифри, шляхи чи списки файлів.\n"
-    "- Кожна execute_command запускається в НОВОМУ shell: `cd` не зберігається між викликами. "
-    "Замість «зайти в папку» використовуй повний шлях: list_directory('/home/sewer/course') "
-    "або execute_command('ls -la /home/sewer/course').\n"
-    "- Для CPU/навантаження: execute_command('mpstat 1 1') або "
-    "execute_command(\"grep 'cpu ' /proc/stat; cat /proc/loadavg\") і поясни РЕАЛЬНИЙ вивід. "
-    "Load average (напр. 1.31) — це НЕ відсотки CPU.\n"
-    "- Якщо інструмент повернув порожній рядок — спробуй іншу команду або шлях, не мовчи."
+    "Ти — технічний AI-асистент на Linux-сервері. Ти САМ викликаєш інструменти.\n"
+    "НІКОЛИ не кажи користувачу «виклич функцію» — це робиш ти.\n"
+    "НІКОЛИ не згадуй Docker, якщо питання не про Docker.\n"
+    "Інструменти:\n"
+    "1. get_system_load — CPU, load average, uptime (навантаження системи).\n"
+    "2. execute_command — shell-команди.\n"
+    "3. list_directory — файли й папки.\n"
+    "4. read_log_tool — логи.\n"
+    "5. get_docker_status — лише для питань про Docker.\n"
+    "Правила: не вигадуй цифри; load average — це НЕ % CPU."
+)
+
+METRICS_KEYWORDS = (
+    "навантаж", "cpu", "статист", "mpstat", "load", "процесор",
+    "операційн", "систем", "ram", "пам'ят", "uptime", "максимальн",
+)
+DOCKER_KEYWORDS = ("docker", "контейнер", "докер")
+BAD_RESPONSE_MARKERS = (
+    "не викликали функцію",
+    "get_docker",
+    "використайте наступний код",
+    "спочатку використайте",
 )
 
 # --- ІНСТРУМЕНТИ ---
+
+def _run_shell(command: str) -> str:
+    try:
+        return subprocess.check_output(
+            command, shell=True, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except subprocess.CalledProcessError as e:
+        return f"Помилка: {e.output.strip()}"
+    except Exception as e:
+        return f"Помилка: {e}"
+
+
+@tool
+def get_system_load():
+    """
+    Повертає навантаження Linux: load average, uptime, mpstat (CPU).
+    Використовуй для питань про CPU, RAM, навантаження — НЕ для Docker.
+    """
+    parts = [
+        "=== load average ===",
+        _run_shell("cat /proc/loadavg"),
+        "=== uptime ===",
+        _run_shell("uptime"),
+        "=== mpstat (1 сек) ===",
+        _run_shell("mpstat 1 1 2>/dev/null || echo 'mpstat не встановлено (apt install sysstat)'"),
+        "=== sar (останні 2 хв, якщо є) ===",
+        _run_shell(
+            "sar -u 1 2 2>/dev/null | tail -5 || "
+            "echo 'sar недоступний — історія за 2 хв недоступна, лише поточний знімок'"
+        ),
+    ]
+    return "\n".join(parts)
+
 
 @tool
 def get_docker_status():
@@ -81,11 +123,26 @@ def execute_command(command: str):
 
 # --- НАЛАШТУВАННЯ ---
 
-TOOLS = [get_docker_status, read_log_tool, list_directory, execute_command]
+TOOLS = [get_system_load, execute_command, list_directory, read_log_tool, get_docker_status]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
 llm = ChatOllama(model="hermes3", temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
+
+
+def is_metrics_question(text: str) -> bool:
+    q = text.lower()
+    return any(k in q for k in METRICS_KEYWORDS)
+
+
+def is_docker_question(text: str) -> bool:
+    q = text.lower()
+    return any(k in q for k in DOCKER_KEYWORDS)
+
+
+def is_bad_meta_response(text: str) -> bool:
+    t = text.lower()
+    return any(m in t for m in BAD_RESPONSE_MARKERS)
 
 
 def trim_session(session_id: str) -> None:
@@ -95,21 +152,12 @@ def trim_session(session_id: str) -> None:
     sessions[session_id] = [history[0]] + history[-MAX_HISTORY_MESSAGES:]
 
 
-class QueryRequest(BaseModel):
-    session_id: str  # Додаємо ID сесії для пам'яті
-    question: str
+def reset_session(session_id: str) -> None:
+    sessions[session_id] = [SystemMessage(content=SYSTEM_PROMPT)]
 
-@app.post("/ask")
-async def ask_question(request: QueryRequest):
-    session_id = request.session_id
-    user_q = request.question
-    
-    if session_id not in sessions:
-        sessions[session_id] = [SystemMessage(content=SYSTEM_PROMPT)]
 
-    sessions[session_id].append(HumanMessage(content=user_q))
-    trim_session(session_id)
-
+def run_tool_loop(session_id: str):
+    """Цикл tool_calls; повертає фінальну AIMessage."""
     response = llm_with_tools.invoke(sessions[session_id])
     iterations = 0
 
@@ -124,12 +172,85 @@ async def ask_question(request: QueryRequest):
             else:
                 output = tool.invoke(tool_call["args"])
             if not str(output).strip():
-                output = "(команда виконана, вивід порожній — спробуй іншу команду або повний шлях)"
+                output = "(порожній вивід — спробуй інший інструмент або повний шлях)"
             sessions[session_id].append(
                 ToolMessage(tool_call_id=tool_call["id"], content=str(output))
             )
 
         response = llm_with_tools.invoke(sessions[session_id])
+
+    return response
+
+
+def answer_from_prefetched_data(user_q: str, tool_output: str) -> str:
+    """Обхід: hermes3 часто не робить tool_calls — підсумовуємо реальні дані без них."""
+    prompt = (
+        f"Питання користувача: {user_q}\n\n"
+        f"Фактичні дані з сервера (get_system_load):\n{tool_output}\n\n"
+        "Дай чітку відповідь українською. Поясни цифри з виводу. "
+        "Не згадуй Docker. Не кажи користувачу викликати інструменти."
+    )
+    response = llm.invoke(
+        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    )
+    return (response.content or "").strip()
+
+
+class QueryRequest(BaseModel):
+    session_id: str
+    question: str
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "api_version": API_VERSION, "model": "hermes3"}
+
+
+@app.post("/reset")
+async def reset(request: QueryRequest):
+    reset_session(request.session_id)
+    return {"status": "session reset", "session_id": request.session_id}
+
+
+@app.post("/ask")
+async def ask_question(request: QueryRequest):
+    session_id = request.session_id
+    user_q = request.question.strip()
+
+    if not user_q:
+        return {"answer": "Порожнє питання."}
+
+    if user_q.lower() in ("/reset", "reset", "скинути", "скидання"):
+        reset_session(session_id)
+        return {"answer": "Сесію скинуто. Можете ставити нові питання."}
+
+    if session_id not in sessions:
+        reset_session(session_id)
+
+    # Питання про навантаження: спочатку збираємо дані на сервері (надійно)
+    if is_metrics_question(user_q) and not is_docker_question(user_q):
+        metrics = get_system_load.invoke({})
+        answer = answer_from_prefetched_data(user_q, metrics)
+        sessions[session_id].append(HumanMessage(content=user_q))
+        sessions[session_id].append(AIMessage(content=answer))
+        trim_session(session_id)
+        return {"answer": answer}
+
+    sessions[session_id].append(HumanMessage(content=user_q))
+    trim_session(session_id)
+
+    response = run_tool_loop(session_id)
+
+    # hermes3 інколи відповідає текстом «виклич docker» замість tool_calls
+    if not getattr(response, "tool_calls", None) and is_bad_meta_response(response.content or ""):
+        reset_session(session_id)
+        sessions[session_id].append(HumanMessage(content=user_q))
+        if is_metrics_question(user_q):
+            metrics = get_system_load.invoke({})
+            answer = answer_from_prefetched_data(user_q, metrics)
+            sessions[session_id].append(AIMessage(content=answer))
+            return {"answer": answer}
+        response = run_tool_loop(session_id)
 
     sessions[session_id].append(response)
     trim_session(session_id)
@@ -137,8 +258,8 @@ async def ask_question(request: QueryRequest):
     answer = (response.content or "").strip()
     if not answer:
         answer = (
-            "Агент не зміг сформулювати відповідь (модель не викликала інструменти "
-            "або потрібен ще один крок). Спробуйте: «покажи вміст /home/sewer/course»."
+            "Агент не зміг сформулювати відповідь. Спробуйте /reset або "
+            "«покажи навантаження CPU»."
         )
 
     return {"answer": answer}

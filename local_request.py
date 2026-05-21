@@ -4,8 +4,8 @@ import requests
 SERVER_IP = "100.113.28.5"
 URL = f"http://{SERVER_IP}:8000/ask"
 
-# Будь-який ідентифікатор сесії — однаковий ID = спільна історія діалогу
-SESSION_ID = "my_session"
+# Однаковий ID = спільна історія. Після оновлення api.py — новий ID або команда /reset
+SESSION_ID = "session_v3"
 
 EXIT_COMMANDS = {"exit", "quit", "q", "вихід"}
 
@@ -26,7 +26,8 @@ def ask_ai(question: str) -> None:
 
 
 def main() -> None:
-    print("Інтерактивний чат з AI-агентом. Введіть 'exit' або 'quit' для виходу.\n")
+    print("Інтерактивний чат з AI-агентом. Введіть 'exit' або 'quit' для виходу.")
+    print("Скинути історію на сервері: /reset\n")
     while True:
         try:
             question = input("Запитай щось: ").strip()
