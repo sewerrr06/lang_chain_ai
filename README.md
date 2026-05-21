@@ -27,7 +27,8 @@ docker compose up --build
 |----------|------------------------|
 | Фронтенд | http://localhost:8080 |
 | API      | http://localhost:8000 |
-| Ollama   | http://localhost:11434 |
+
+Ollama працює лише всередині Docker-мережі (порт 11434 на хост не відкрито — щоб не конфліктувати з локальною Ollama). Доступ з хоста: `docker compose exec ollama ollama list`.
 
 Фронтенд проксує запити через `/api/*` → бекенд. Docker socket змонтовано в API, щоб інструмент `get_docker_status` бачив контейнери хоста.
 

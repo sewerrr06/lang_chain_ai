@@ -3,8 +3,8 @@ services:
     image: ollama/ollama:latest
     volumes:
       - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
+    # Порт 11434 не публікуємо на хост — інакше конфлікт з локальною Ollama.
+    # API підключається внутрішньо: http://ollama:11434
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
