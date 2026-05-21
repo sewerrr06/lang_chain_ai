@@ -2,51 +2,62 @@
 
 Локальний RAG та FastAPI-агент на Ollama (`hermes3` за замовчуванням).
 
+## Розгортання: сервер + локальний фронт
+
+**На Linux-сервері** (sewers-hp / Tailscale) — лише бекенд:
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+Перший запуск завантажить `hermes3` (5–15 хв). API: `http://<IP_сервера>:8000`.
+
+У `.env` на сервері вкажіть CORS для вашого Mac:
+
+```
+CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+```
+
+**На Mac (локально)** — веб-чат:
+
+```bash
+cp frontend/config.example.js frontend/config.js
+# Відредагуйте API_BASE — IP сервера (напр. Tailscale 100.113.28.5)
+
+chmod +x scripts/run-frontend.sh
+./scripts/run-frontend.sh
+```
+
+Відкрийте http://localhost:8080 — запити йдуть напряму на `http://<сервер>:8000`.
+
+URL API можна змінити в полі «API на сервері» в сайдбарі (зберігається в браузері).
+
+### Перевірка
+
+```bash
+curl http://100.113.28.5:8000/health
+```
+
 ## Файли
 
 - `rag_script.py` — індексація `data.txt` у Chroma
 - `agent.py` — чат з cybersecurity system prompt
 - `api.py` — FastAPI `/ask` (Docker-aware)
 - `local_request.py` — CLI-клієнт для API
-- `frontend/` — веб-чат (nginx у Docker)
+- `frontend/` — локальний веб-чат
+- `docker-compose.yml` — сервер: Ollama + API
+- `docker-compose.full.yml` — опційно nginx-фронт на тій же машині
 
-## Docker (рекомендовано)
-
-Потрібні: [Docker](https://docs.docker.com/get-docker/) та [Docker Compose](https://docs.docker.com/compose/).
-
-```bash
-# Опційно: скопіюйте .env.example → .env і змініть модель
-cp .env.example .env
-
-docker compose up --build
-```
-
-Перший запуск завантажить модель Ollama (може зайняти 5–15 хв).
-
-| Сервіс   | URL                    |
-|----------|------------------------|
-| Фронтенд | http://localhost:8080 |
-| API      | http://localhost:8000 |
-
-Ollama працює лише всередині Docker-мережі (порт 11434 на хост не відкрито — щоб не конфліктувати з локальною Ollama). Доступ з хоста: `docker compose exec ollama ollama list`.
-
-Фронтенд проксує запити через `/api/*` → бекенд. Docker socket змонтовано в API, щоб інструмент `get_docker_status` бачив контейнери хоста.
+## Docker: все на одній машині (опційно)
 
 ```bash
-# Зупинити
-docker compose down
-
-# Логи API
-docker compose logs -f api
+docker compose -f docker-compose.yml -f docker-compose.full.yml up --build
 ```
 
-Інша модель у `.env`:
+Фронт: http://localhost:8080 (проксі `/api` → бекенд).
 
-```
-OLLAMA_MODEL=llama3:8b
-```
-
-## Локальний запуск (без Docker)
+## Локальний запуск без Docker
 
 ```bash
 python -m venv venv
@@ -54,18 +65,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ollama pull hermes3
 
-python rag_script.py   # опційно
 python api.py
-```
-
-Фронтенд без nginx: відкрийте `frontend/index.html` і в `app.js` змініть `API_BASE` на `http://localhost:8000`, або запустіть простий сервер:
-
-```bash
-cd frontend && python -m http.server 8080
 ```
 
 CLI-клієнт:
 
 ```bash
-SERVER_IP=127.0.0.1 python local_request.py
+SERVER_IP=100.113.28.5 python local_request.py
 ```

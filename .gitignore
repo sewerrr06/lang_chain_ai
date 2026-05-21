@@ -16,6 +16,9 @@ dist/
 .env.*
 !.env.example
 
+# Локальний URL API (копія config.example.js)
+frontend/config.js
+
 # Vector DB (generated locally)
 chroma_db/
 
