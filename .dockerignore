@@ -1,0 +1,15 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+chroma_db/
+.env
+.env.*
+!.env.example
+frontend/
+*.md
+local_request.py
+agent.py
+rag_script.py
+data.txt

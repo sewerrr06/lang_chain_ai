@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Agent — LangChain</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-main">
+        <h1>AI Agent</h1>
+        <p class="subtitle">Технічний агент з інструментами (сервер, Docker, веб-пошук)</p>
+      </div>
+      <div class="header-status">
+        <span id="status-dot" class="status-dot offline" title="Статус API"></span>
+        <span id="status-text">Перевірка…</span>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <label for="session-id">ID сесії</label>
+      <input id="session-id" type="text" placeholder="session_…" autocomplete="off" />
+      <button type="button" id="new-session" class="btn secondary">Нова сесія</button>
+      <button type="button" id="reset-session" class="btn secondary">Скинути історію</button>
+      <p class="hint">Команда в чаті: <code>/reset</code></p>
+    </aside>
+
+    <main class="chat" id="chat" aria-live="polite"></main>
+
+    <form class="composer" id="form">
+      <textarea
+        id="question"
+        rows="2"
+        placeholder="Запитайте про сервер, Docker, погоду…"
+        required
+      ></textarea>
+      <button type="submit" id="send" class="btn primary">Надіслати</button>
+    </form>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

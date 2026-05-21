@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -9,43 +10,37 @@ import subprocess
 import os
 
 app = FastAPI()
-API_VERSION = "2.2"
+API_VERSION = "2.4"
 
-# --- ПАМ'ЯТЬ (Історія діалогів) ---
-# Структура: { session_id: [messages] }
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "hermes3")
+
 sessions = {}
 MAX_TOOL_ITERATIONS = 10
 MAX_HISTORY_MESSAGES = 40
 
 SYSTEM_PROMPT = (
     "Ти — технічний AI-агент. Твоє завдання — керувати сервером та перевіряти факти.\n"
-    "Якщо ти в чомусь сумніваєшся або потрібна актуальна інформація — ВИКОРИСТОВУЙ web_search.\n"
-    "Якщо результат пошуку суперечить твоїм внутрішнім знанням — посилайся на результати пошуку.\n"
-    "МОВА (обов'язково): відповідай ВИКЛЮЧНО мовою останнього повідомлення користувача.\n"
-    "Питання українською — вся відповідь українською; англійською — англійською.\n"
-    "Не копіюй сирий текст з web_search — переказуй своїми словами потрібною мовою.\n"
-    "Заборонено змішувати мови в одній відповіді (англійська, китайська, українська тощо)."
-)
-
-LANGUAGE_LABELS = {
-    "uk": "українською",
-    "en": "англійською",
-    "ru": "російською",
-}
-
-METRICS_KEYWORDS = (
-    "навантаж", "cpu", "статист", "mpstat", "load", "процесор",
-    "операційн", "систем", "ram", "пам'ят", "uptime", "максимальн",
-)
-DOCKER_KEYWORDS = ("docker", "контейнер", "докер")
-BAD_RESPONSE_MARKERS = (
-    "не викликали функцію",
-    "get_docker",
-    "використайте наступний код",
-    "спочатку використайте",
+    "Сам вибирай і викликай інструменти за змістом питання — не проси користувача їх викликати.\n"
+    "Для актуальних фактів (погода, новини, курси тощо) — web_search.\n"
+    "Для стану сервера, файлів, логів, Docker — відповідні серверні інструменти.\n"
+    "Після отримання результатів інструментів обов'язково дай повну текстову відповідь.\n"
+    "МОВА: відповідай тією ж мовою, що й останнє повідомлення користувача.\n"
+    "Не копіюй сирий текст з web_search — переказуй своїми словами.\n"
+    "Заборонено змішувати кілька мов в одній відповіді."
 )
 
 # --- ІНСТРУМЕНТИ ---
+
 
 def _run_shell(command: str) -> str:
     try:
@@ -60,10 +55,7 @@ def _run_shell(command: str) -> str:
 
 @tool
 def get_system_load():
-    """
-    Повертає навантаження Linux: load average, uptime, mpstat (CPU).
-    Використовуй для питань про CPU, RAM, навантаження — НЕ для Docker.
-    """
+    """Повертає навантаження Linux: load average, uptime, mpstat (CPU), sar."""
     parts = [
         "=== load average ===",
         _run_shell("cat /proc/loadavg"),
@@ -85,54 +77,45 @@ def get_docker_status():
     """Повертає список запущених Docker контейнерів."""
     return subprocess.check_output(["docker", "ps"], text=True)
 
+
 @tool
 def read_log_tool(file_path: str, lines: int = 20):
-    """
-    Зчитує останні N рядків з файлу логів.
-    Використовуй, коли користувач просить проаналізувати логи або помилки.
-    """
+    """Зчитує останні N рядків з файлу логів."""
     if not os.path.exists(file_path):
         return f"Файл {file_path} не знайдено."
     try:
-        # Використовуємо tail для отримання останніх N рядків
         return subprocess.check_output(["tail", "-n", str(lines), file_path], text=True)
     except Exception as e:
         return f"Помилка читання файлу: {str(e)}"
 
+
 @tool
 def list_directory(path: str = "."):
-    """
-    Показує список файлів та папок у вказаній директорії.
-    Використовуй це, щоб орієнтуватися у файловій системі.
-    """
+    """Показує список файлів та папок у вказаній директорії."""
     try:
         return subprocess.check_output(["ls", "-F", path], text=True)
     except Exception as e:
         return f"Помилка доступу до папки: {str(e)}"
 
+
 @tool
 def execute_command(command: str):
-    """
-    Виконує команду в терміналі (наприклад: 'pwd', 'ls -la /home/user/course', 'mpstat 1 1').
-    Кожен виклик — окремий shell; `cd` не діє між викликами — використовуй абсолютні шляхи.
-    """
+    """Виконує shell-команду. Кожен виклик — окремий shell; cd не зберігається між викликами."""
     try:
-        result = subprocess.check_output(
+        return subprocess.check_output(
             command, shell=True, text=True, stderr=subprocess.STDOUT
         )
-        return result
     except subprocess.CalledProcessError as e:
         return f"Помилка при виконанні команди '{command}': {e.output}"
     except Exception as e:
         return f"Помилка: {str(e)}"
 
-# --- НАЛАШТУВАННЯ ---
 
 search_tool = DuckDuckGoSearchRun()
 search_tool.name = "web_search"
 search_tool.description = (
-    "Використовуй для пошуку в інтернеті, щоб перевірити факти або уточнити інформацію. "
-    "Результати можуть бути різними мовами — у відповіді користувачу переказуй лише мовою його питання."
+    "Пошук в інтернеті для актуальних фактів. "
+    "У відповіді користувачу переказуй результат тією ж мовою, що й його питання."
 )
 
 TOOLS = [
@@ -145,74 +128,48 @@ TOOLS = [
 ]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
-llm = ChatOllama(model="hermes3", temperature=0)
+llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
 llm_with_tools = llm.bind_tools(TOOLS)
 
 
-def detect_question_language(text: str) -> str:
-    """Мова останнього питання: uk, en або ru."""
-    if re.search(r"[іїєґІЇЄҐ]", text):
-        return "uk"
-    t = text.lower()
-    uk_hints = (
-        "привіт", "що", "як", "розкажи", "покажи", "навантаж", "докер",
-        "контейнер", "сервер", "систем", "пам'ят", "операційн", "україн",
-    )
-    if any(h in t for h in uk_hints):
-        return "uk"
-    if re.search(r"[а-яА-ЯёЁ]", text):
-        return "ru"
-    return "en"
+def _letter_counts(text: str) -> tuple[int, int]:
+    cyrillic = len(re.findall(r"[а-яА-ЯіїєґІЇЄҐёЁ]", text))
+    latin = len(re.findall(r"[a-zA-Z]", text))
+    return cyrillic, latin
 
 
-def needs_language_fix(question_lang: str, answer: str) -> bool:
+def needs_language_fix(user_q: str, answer: str) -> bool:
     if not answer.strip():
         return False
     if re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", answer):
         return True
-    cyrillic = len(re.findall(r"[а-яА-ЯіїєґІЇЄҐёЁ]", answer))
-    latin = len(re.findall(r"[a-zA-Z]", answer))
-    if question_lang == "uk" and latin > 80 and cyrillic < 40:
+    q_cyr, q_lat = _letter_counts(user_q)
+    a_cyr, a_lat = _letter_counts(answer)
+    q_cyrillic = q_cyr >= q_lat
+    a_cyrillic = a_cyr >= a_lat
+    if (q_cyr + q_lat) > 3 and q_cyrillic != a_cyrillic:
         return True
-    if question_lang in ("uk", "ru") and latin > 200 and cyrillic < latin // 3:
+    if q_cyrillic and a_lat > 80 and a_cyr < 40:
         return True
-    if question_lang == "en" and cyrillic > 80:
+    if not q_cyrillic and q_lat > 3 and a_cyr > 80:
         return True
     return False
 
 
 def ensure_answer_language(user_q: str, answer: str) -> str:
-    lang = detect_question_language(user_q)
-    if not needs_language_fix(lang, answer):
+    if not needs_language_fix(user_q, answer):
         return answer
-    label = LANGUAGE_LABELS.get(lang, lang)
     prompt = (
-        f"Питання користувача ({label}): {user_q}\n\n"
-        f"Чернетка відповіді агента:\n{answer}\n\n"
-        f"Перепиши однією відповіддю ВИКЛЮЧНО {label}. "
-        "Збережи факти, прибери дублікати, посилання з пошуку та фрагменти іншими мовами. "
-        "Не згадуй інструменти та web_search."
+        f"Питання користувача:\n{user_q}\n\n"
+        f"Чернетка відповіді:\n{answer}\n\n"
+        "Перепиши однією відповіддю тією ж мовою, що й питання. "
+        "Збережи факти, прибери дублікати та фрагменти іншими мовами. "
+        "Не згадуй інструменти."
     )
     response = llm.invoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
     )
-    fixed = (response.content or "").strip()
-    return fixed or answer
-
-
-def is_metrics_question(text: str) -> bool:
-    q = text.lower()
-    return any(k in q for k in METRICS_KEYWORDS)
-
-
-def is_docker_question(text: str) -> bool:
-    q = text.lower()
-    return any(k in q for k in DOCKER_KEYWORDS)
-
-
-def is_bad_meta_response(text: str) -> bool:
-    t = text.lower()
-    return any(m in t for m in BAD_RESPONSE_MARKERS)
+    return (response.content or "").strip() or answer
 
 
 def trim_session(session_id: str) -> None:
@@ -226,8 +183,15 @@ def reset_session(session_id: str) -> None:
     sessions[session_id] = [SystemMessage(content=SYSTEM_PROMPT)]
 
 
-def run_tool_loop(session_id: str):
-    """Цикл tool_calls; повертає фінальну AIMessage."""
+def run_web_search(query: str) -> str:
+    try:
+        result = search_tool.invoke(query)
+        return str(result).strip() if result else ""
+    except Exception as e:
+        return f"Помилка пошуку: {e}"
+
+
+def run_tool_loop(session_id: str) -> AIMessage:
     response = llm_with_tools.invoke(sessions[session_id])
     iterations = 0
 
@@ -242,7 +206,7 @@ def run_tool_loop(session_id: str):
             else:
                 output = tool.invoke(tool_call["args"])
             if not str(output).strip():
-                output = "(порожній вивід — спробуй інший інструмент або повний шлях)"
+                output = "(порожній вивід — спробуй інший інструмент або інший запит)"
             sessions[session_id].append(
                 ToolMessage(tool_call_id=tool_call["id"], content=str(output))
             )
@@ -252,20 +216,51 @@ def run_tool_loop(session_id: str):
     return response
 
 
-def answer_from_prefetched_data(user_q: str, tool_output: str) -> str:
-    """Обхід: hermes3 часто не робить tool_calls — підсумовуємо реальні дані без них."""
-    label = LANGUAGE_LABELS.get(detect_question_language(user_q), "українською")
+def _summarize_context(user_q: str, context: str, context_title: str) -> str:
     prompt = (
-        f"Питання користувача: {user_q}\n\n"
-        f"Фактичні дані з сервера (get_system_load):\n{tool_output}\n\n"
-        f"Дай чітку відповідь виключно {label}. Поясни цифри з виводу. "
-        "Не згадуй Docker. Не кажи користувачу викликати інструменти."
+        f"Питання користувача:\n{user_q}\n\n"
+        f"{context_title}:\n{context}\n\n"
+        "Дай повну відповідь на основі цих даних тією ж мовою, що й питання. "
+        "Якщо даних недостатньо — скажи чесно. Не згадуй інструменти."
     )
     response = llm.invoke(
         [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
     )
     raw = (response.content or "").strip()
     return ensure_answer_language(user_q, raw)
+
+
+def answer_from_tool_context(session_id: str, user_q: str) -> str:
+    outputs = [
+        msg.content
+        for msg in sessions[session_id]
+        if isinstance(msg, ToolMessage) and str(msg.content).strip()
+    ]
+    if not outputs:
+        return ""
+    combined = "\n\n---\n\n".join(outputs[-5:])
+    return _summarize_context(user_q, combined, "Дані з інструментів")
+
+
+def answer_from_web_search(user_q: str) -> str:
+    search_data = run_web_search(user_q)
+    if not search_data:
+        return ""
+    return _summarize_context(user_q, search_data, "Результати веб-пошуку")
+
+
+def finalize_answer(session_id: str, user_q: str, response: AIMessage) -> str:
+    answer = (response.content or "").strip()
+    if not answer:
+        answer = answer_from_tool_context(session_id, user_q)
+    if not answer:
+        answer = answer_from_web_search(user_q)
+    if not answer:
+        return (
+            "Агент не зміг сформулювати відповідь. Спробуйте /reset або "
+            "переформулюйте питання."
+        )
+    return ensure_answer_language(user_q, answer)
 
 
 class QueryRequest(BaseModel):
@@ -275,7 +270,12 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "api_version": API_VERSION, "model": "hermes3"}
+    return {
+        "status": "ok",
+        "api_version": API_VERSION,
+        "model": OLLAMA_MODEL,
+        "ollama_base_url": OLLAMA_BASE_URL,
+    }
 
 
 @app.post("/reset")
@@ -292,52 +292,26 @@ async def ask_question(request: QueryRequest):
     if not user_q:
         return {"answer": "Порожнє питання."}
 
-    if user_q.lower() in ("/reset", "reset", "скинути", "скидання"):
+    if user_q.lower().startswith("/reset"):
         reset_session(session_id)
         return {"answer": "Сесію скинуто. Можете ставити нові питання."}
 
     if session_id not in sessions:
         reset_session(session_id)
 
-    # Питання про навантаження: спочатку збираємо дані на сервері (надійно)
-    if is_metrics_question(user_q) and not is_docker_question(user_q):
-        metrics = get_system_load.invoke({})
-        answer = answer_from_prefetched_data(user_q, metrics)
-        sessions[session_id].append(HumanMessage(content=user_q))
-        sessions[session_id].append(AIMessage(content=answer))
-        trim_session(session_id)
-        return {"answer": ensure_answer_language(user_q, answer)}
-
     sessions[session_id].append(HumanMessage(content=user_q))
     trim_session(session_id)
 
     response = run_tool_loop(session_id)
+    answer = finalize_answer(session_id, user_q, response)
 
-    # hermes3 інколи відповідає текстом «виклич docker» замість tool_calls
-    if not getattr(response, "tool_calls", None) and is_bad_meta_response(response.content or ""):
-        reset_session(session_id)
-        sessions[session_id].append(HumanMessage(content=user_q))
-        if is_metrics_question(user_q):
-            metrics = get_system_load.invoke({})
-            answer = answer_from_prefetched_data(user_q, metrics)
-            sessions[session_id].append(AIMessage(content=answer))
-            return {"answer": ensure_answer_language(user_q, answer)}
-        response = run_tool_loop(session_id)
-
-    sessions[session_id].append(response)
+    sessions[session_id].append(AIMessage(content=answer))
     trim_session(session_id)
-
-    answer = (response.content or "").strip()
-    if not answer:
-        answer = (
-            "Агент не зміг сформулювати відповідь. Спробуйте /reset або "
-            "«покажи навантаження CPU»."
-        )
-    else:
-        answer = ensure_answer_language(user_q, answer)
 
     return {"answer": answer}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
