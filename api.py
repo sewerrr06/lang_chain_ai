@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.tools import tool
@@ -18,7 +19,7 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
 
-API_VERSION = "2.4"
+API_VERSION = "2.5"
 OLLAMA_READY = False
 
 CORS_ORIGINS = [
@@ -191,6 +192,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+logger.info("Запуск API v%s, Ollama: %s", API_VERSION, OLLAMA_BASE_URL)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.exception("Unhandled error on %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": (
+                f"{type(exc).__name__}: {exc}. "
+                "Перевірте: docker compose logs api --tail 30"
+            )
+        },
+    )
+
 
 WEB_SEARCH_HINTS = (
     "погод", "новин", "курс", "ціна", "сьогодні", "зараз", "актуальн",

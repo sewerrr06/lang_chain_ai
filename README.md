@@ -16,7 +16,14 @@ docker compose --profile init run --rm ollama-init
 docker compose up -d --build
 ```
 
-API: `http://<IP_сервера>:8000`.
+API: `http://<IP_сервера>:8000`. Контейнер `api` ділить мережу з `ollama` (`127.0.0.1:11434`) — це усуває `ConnectTimeout` до `ollama:11434`.
+
+Після деплою перевірте версію: `curl -s http://127.0.0.1:8000/health` → `"api_version":"2.5"`.
+
+```bash
+chmod +x scripts/diagnose-ollama.sh
+./scripts/diagnose-ollama.sh
+```
 
 У `.env` на сервері вкажіть CORS для вашого Mac:
 
