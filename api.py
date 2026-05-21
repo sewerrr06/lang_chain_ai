@@ -2,84 +2,91 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 import subprocess
+import os
 
 app = FastAPI()
+
+# --- ПАМ'ЯТЬ (Історія діалогів) ---
+# Структура: { session_id: [messages] }
+sessions = {}
 
 # --- ІНСТРУМЕНТИ ---
 
 @tool
-def get_docker_tool():
-    """Повертає список запущених Docker контейнерів. Використовуй це для питань про докери."""
-    try:
-        return subprocess.check_output(["docker", "ps"], text=True)
-    except Exception as e:
-        return f"Помилка Docker: {str(e)}"
+def get_docker_status():
+    """Повертає список запущених Docker контейнерів."""
+    return subprocess.check_output(["docker", "ps"], text=True)
 
 @tool
-def get_system_stats():
-    """Повертає завантаженість системи: RAM, CPU load (uptime). Використовуй це, коли питають про ресурси, навантаження, CPU або RAM."""
+def read_log_tool(file_path: str, lines: int = 20):
+    """
+    Зчитує останні N рядків з файлу логів.
+    Використовуй, коли користувач просить проаналізувати логи або помилки.
+    """
+    if not os.path.exists(file_path):
+        return f"Файл {file_path} не знайдено."
     try:
-        mem = subprocess.check_output(["free", "-h"], text=True)
-        load = subprocess.check_output(["uptime"], text=True)
-        return f"Пам'ять (RAM):\n{mem}\nНавантаження (Load): {load}"
+        # Використовуємо tail для отримання останніх N рядків
+        return subprocess.check_output(["tail", f"-n {lines}", file_path], text=True)
     except Exception as e:
-        return f"Помилка системи: {str(e)}"
+        return f"Помилка читання файлу: {str(e)}"
 
 # --- НАЛАШТУВАННЯ ---
 
 llm = ChatOllama(model="hermes3", temperature=0)
-# Додаємо список інструментів
-llm_with_tools = llm.bind_tools([get_docker_tool, get_system_stats])
+llm_with_tools = llm.bind_tools([get_docker_status, read_log_tool])
 
 class QueryRequest(BaseModel):
+    session_id: str  # Додаємо ID сесії для пам'яті
     question: str
 
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
-    # Явно перераховуємо інструменти в системному промпті для надійності
-    system_prompt = (
-        "Ти — системний AI-агент. Тобі доступні інструменти:\n"
-        "1. get_docker_tool - для перевірки Docker контейнерів.\n"
-        "2. get_system_stats - для перевірки навантаження CPU/RAM.\n"
-        "Якщо користувач питає про це — ВИКОРИСТОВУЙ відповідний інструмент. НЕ вигадуй дані."
-    )
+    session_id = request.session_id
+    user_q = request.question
     
-    # Безпечне вилучення даних
-    data = request.model_dump()
-    user_q = data.get("question")
+    # Ініціалізація історії для нової сесії
+    if session_id not in sessions:
+        sessions[session_id] = [
+            SystemMessage(content=(
+                "Ти — технічний AI-агент. Тобі доступні інструменти:\n"
+                "1. get_docker_status - для Docker.\n"
+                "2. read_log_tool - для читання логів (потрібен шлях до файлу).\n"
+                "Пам'ятай контекст попередніх повідомлень. Якщо помилка в логах - аналізуй її."
+            ))
+        ]
     
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_q)
-    ]
+    # Додаємо питання користувача в історію
+    sessions[session_id].append(HumanMessage(content=user_q))
     
-    # Перший виклик моделі
-    response = llm_with_tools.invoke(messages)
+    # Виклик моделі з повною історією
+    response = llm_with_tools.invoke(sessions[session_id])
     
-    # Цикл обробки інструментів (може викликати кілька)
+    # Якщо модель викликає інструменти
     if response.tool_calls:
-        print(f"DEBUG: Агент вирішив викликати: {response.tool_calls}")
-        messages.append(response) # Додаємо запит моделі на інструмент
+        sessions[session_id].append(response) # Додаємо запит моделі
         
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
-            tool_id = tool_call["id"]
+            tool_args = tool_call["args"]
             
             # Виконання
-            if tool_name == "get_docker_tool":
-                output = get_docker_tool.invoke({})
-            elif tool_name == "get_system_stats":
-                output = get_system_stats.invoke({})
+            if tool_name == "get_docker_status":
+                output = get_docker_status.invoke({})
+            elif tool_name == "read_log_tool":
+                output = read_log_tool.invoke(tool_args)
             else:
                 output = "Невідомий інструмент."
                 
-            messages.append(ToolMessage(tool_call_id=tool_id, content=output))
+            sessions[session_id].append(ToolMessage(tool_call_id=tool_call["id"], content=output))
         
-        # Фінальний виклик з результатами
-        final_response = llm_with_tools.invoke(messages)
-        return {"answer": final_response.content}
+        # Фінальний виклик
+        response = llm_with_tools.invoke(sessions[session_id])
+    
+    # Додаємо фінальну відповідь моделі в історію
+    sessions[session_id].append(response)
     
     return {"answer": response.content}
 
